@@ -1,0 +1,25 @@
+{
+  // Use Biome as default formatter
+  "editor.defaultFormatter": "biomejs.biome",
+  // "biome.lsp.bin": "node_modules/.bin/@biomejs/biome",
+  "[typescript]": {
+    "editor.defaultFormatter": "biomejs.biome"
+  },
+  // Enable formatting on save (only formatting, not lint fixes)
+  "editor.formatOnSave": true,
+
+  // Disable auto lint fix on save
+  "editor.codeActionsOnSave": {
+    "source.fixAll.biome": "never"
+  },
+
+  // Show lint errors directly in the editor
+  "biome.lint.run": "onType", // or "onSave" if you want checks only when saved
+
+  // Treat lint warnings as errors in problems panel
+  "biome.lint.severity": {
+    "all": "error"
+  }
+}
+
+
