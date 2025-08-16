@@ -10,9 +10,8 @@
 
   // Disable auto lint fix on save
   "editor.codeActionsOnSave": {
-    "source.fixAll.biome": "never"
+    "source.fixAll.biome": "always"
   },
-
   // Show lint errors directly in the editor
   "biome.lint.run": "onType", // or "onSave" if you want checks only when saved
 
