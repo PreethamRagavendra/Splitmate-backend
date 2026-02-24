@@ -1,278 +1,223 @@
-import { Getter, Setter, atom } from 'jotai'
-import { RESET } from 'jotai/utils'
-import { CHART_TYPES } from 'src/features/trends/constants/chart'
-import { SERIES_VISUAL_DIMENSION_CONFIGS } from 'src/features/trends/constants/visualSettings'
-import { Property } from 'src/features/trends/types/property'
+
+Two types:
+
+Type 1: axisType of 'y' and axisType of "exception": Single Color
+Type 2: axisType of 'timeline': Multi Color
+
+
+1) When ever activePayloadPropertyList is updated with new properties assignDefaultVisualsActionAtom will be triggered with activePayloadPropertyList as payload
+
+2) Inside the assignDefaultVisualsActionSetter of assignDefaultVisualsActionAtom, if no activePayloadPropertyList is there return from triggering further steps
+
+3) If activePayloadPropertyList is available proceed
+
+4) Create empty localPropertyVisualSettings
+
+4) Loop through the activePayloadPropertyList and check against _propertyVisualSettingsAtom. 
+
+	4.1) If if of Property type definition is available inside _propertyVisualSettingsAtom: 
+		4.1.1) Collect all and pass the visual settings and use combinationToIndex to update the usedIndexes in the service instance, if the combination isn't available ignore updating in usedIndexes
+		4.1.2) Update those visuals inside empty against property id
+	4.2) If property id is not available inside _propertyVisualSettingsAtom: 
+		4.2.1) Collect them for further procedure
+
+5) Loop through filtered properties from step 4 and check if each property has a attribute called defaultVisuals:
+	
+	5.1) If Property Object contains defaultVisuals: 
+		5.1.1) Collect all and pass the visual settings and use combinationToIndex to update the usedIndexes in the service instance, if the combination isn't available ignore updating in usedIndexes
+		5.1.2) Update those visuals inside empty against property id
+	5.2) If Property object doesn't contain defaultVisuals:
+		5.2.1) Collect them for further procedure
+
+6) Loop through filtered properties from step 5
+	
+	Note: This step will be dependent on chartSettings which will be based on propertyKey.
+
+
+If while looping:
+
+If type 1: 
+
+Check if propertie's: propertyKey has default chart settings in chart Settings response, 
+	If available: pick the first color, and check if that combination is valid
+		If valid: Check if visual combination is already picked or noy
+			If picked: Ignore and collect the property for further processing
+			If not picked: Add the visual settings for that id in localProeprtyVisual settings and added it to usedIndexes
+		If not valid: Add the visual Settings for that id in localPropertyVisualSettings
+	If not available: Collect the Property for further processing
+
+If type 2:
+
+Check if propertie's: propertyKey has default chart settings in chart Settings response, 
+	If available: Assign it to MultiStateColorConfigType of property
+	If not available: Collect the property for further processing
+
+7) Separate type 1 properties and type 2 properties for collected properties which needs processing
+
+8) For Type 1 properties use chart bucket: Loop through the properties, and assign visual settings using used: set<number> free: MinHeap<number> Implemebt reusable min heap and nex Index
+
+9) For Type 2 properties use chart bucket: Loop through the properties, and assign visual settings using index using used: set<number> free: MinHeap<number> Implemebt reusable min heap and nex Index
+
 import {
   PropertyVisualSettings,
   SeriesVisualDimensionConfig,
-  VisualAssignmentBucket,
-  VisualScope,
 } from 'src/features/trends/types/visualSettings'
-import { activeChartConfigAtom } from '../../initialization/activeChartConfigAtom'
-import { propertyVisualSettingsAtom } from './propertyVisualSettings'
 
-const _defaultVisualAssignmentServiceAtom = atom<Record<
-  'chartService' | 'ganttService',
-  AssignmentService
-> | null>(null)
+/**
+ * Converts combination index to visual style based on chart-specific config
+ *
+ * Example: Line chart with 18 colors, 3 lineTypes, 3 symbols
+ * Priority: ['color', 'lineType', 'symbolType']
+ *
+ * Index 0: color[0], solid, circle
+ * Index 1: color[1], solid, circle
+ * Index 2: color[2], solid, circle
 
-export const initialiseDefaultVisualAssignment = atom(
-  null,
-  initialiseDefaultVisualAssignmentSetter,
-)
+ * Index 36: color[0], dotted, circle
+ * Index 54: color[0], solid, rect
+ */
+/**
+ * Converts a linear index to a combination of visual settings (color, lineType, symbolType, etc.)
+ * according to the provided config's priority and dimension arrays.
+ *
+ * Edge Cases Handled:
+ * - If a dimension in priority is missing from dimensions, it is skipped.
+ * - If index exceeds the total number of combinations, the result wraps around (modulo behavior).
+ * - Handles any number of dimensions and any order of priority.
+ *
+ * @param index - Linear index to convert
+ * @param config - SeriesVisualDimensionConfig with priority and dimensions
+ * @returns PropertyVisualSettings object for the given index
+ */
+export const indexToCombination = (
+  index: number,
+  config: SeriesVisualDimensionConfig,
+): PropertyVisualSettings => {
+  const { priority, dimensions } = config
 
-function initialiseDefaultVisualAssignmentSetter(
-  get: Getter,
-  set: Setter,
-  reset?: typeof RESET,
-): void {
-  const activeChart = get(activeChartConfigAtom)
-
-  if (!activeChart || reset === RESET) {
-    set(_defaultVisualAssignmentServiceAtom, null)
-    return
+  // Build arrays of dimension sizes and keys in priority order
+  const dimensionSizes: number[] = []
+  const dimensionKeys: string[] = []
+  for (const dim of priority) {
+    if (dim in dimensions) {
+      const dimKey = dim as keyof SeriesVisualDimensionConfig['dimensions']
+      dimensionSizes.push(dimensions[dimKey].length)
+      dimensionKeys.push(dim)
+    }
   }
 
-  let config = SERIES_VISUAL_DIMENSION_CONFIGS.default
-  if (activeChart.type && activeChart.type === CHART_TYPES.LINE) {
-    config = SERIES_VISUAL_DIMENSION_CONFIGS.Line
+  // Convert linear index to multi-dimensional indices (leftmost varies fastest)
+  let remaining = index
+  const indices: number[] = []
+  for (let i = 0; i < dimensionSizes.length; i++) {
+    indices[i] = remaining % dimensionSizes[i]
+    remaining = Math.floor(remaining / dimensionSizes[i])
   }
-  const chartService = new AssignmentService(config)
-  const ganttService = new AssignmentService(
-    SERIES_VISUAL_DIMENSION_CONFIGS.Gantt,
-  )
-  set(_defaultVisualAssignmentServiceAtom, {
-    chartService: chartService,
-    ganttService: ganttService,
-  })
+
+  // Build the visual settings object from indices
+  const visualSettings: Partial<PropertyVisualSettings> = {}
+  for (let i = 0; i < dimensionKeys.length; i++) {
+    const dimKey = dimensionKeys[
+      i
+    ] as keyof SeriesVisualDimensionConfig['dimensions']
+    const dimValue = dimensions[dimKey][indices[i]]
+    visualSettings[dimKey] =
+      dimValue as unknown as PropertyVisualSettings[typeof dimKey]
+  }
+
+  return visualSettings as PropertyVisualSettings
 }
 
-export const assignDefaultVisualsActionAtom = atom(
-  null,
-  assignDefaultVisualsActionSetter,
-)
+/**
+ * Calculates the total number of unique visual combinations possible
+ * for the given config (product of all dimension lengths in priority).
+ *
+ * Edge Cases Handled:
+ * - If a dimension in priority is missing from dimensions, it is treated as length 1.
+ * - If dimensions are empty, returns 1 (single combination).
+ *
+ * @param config - SeriesVisualDimensionConfig
+ * @returns Number of possible combinations
+ */
+export const getTotalCombinations = (
+  config: SeriesVisualDimensionConfig,
+): number => {
+  const { priority, dimensions } = config
+  return priority.reduce((total, dim) => {
+    const arr =
+      dimensions[dim as keyof SeriesVisualDimensionConfig['dimensions']]
+    return total * ((arr && arr.length) || 1)
+  }, 1)
+}
 
-function assignDefaultVisualsActionSetter(
-  get: Getter,
-  set: Setter,
-  _payload?: Property[],
-): void {
-  const service = get(_defaultVisualAssignmentServiceAtom)
-  const activeChart = get(activeChartConfigAtom)
+/**
+ * Converts a PropertyVisualSettings object to its corresponding linear index
+ * according to the config's priority and dimension arrays.
+ *
+ * - Fills missing optional visuals from defaults if provided.
+ * - Requires 'color' to be present (either in combination or defaults).
+ * - Returns -1 if a required value is missing or not found in dimension array.
+ * - Works for any config/priority.
+ *
+ * @param combination - PropertyVisualSettings to convert
+ * @param config - SeriesVisualDimensionConfig
+ * @param defaults - (optional) object with default values for missing visuals
+ * @returns Linear index for the combination, or -1 if invalid
+ */
+export const combinationToIndex = (
+  combination: PropertyVisualSettings,
+  config: SeriesVisualDimensionConfig,
+  defaults?: Partial<PropertyVisualSettings>,
+): number => {
+  const { priority, dimensions } = config
+  const dimensionSizes: number[] = []
+  const indices: number[] = []
+  // Required keys (can be extended as needed)
+  const requiredKeys = ['color']
 
-  if (!activeChart) {
-    set(_defaultVisualAssignmentServiceAtom, null)
-    return
-  }
-
-  // Step 2: Early exit if no active properties
-  if (!_payload || !_payload.length) {
-    return
-  }
-
-  // Step 3: Initialize localPropertyVisualSettings
-  let localPropertyVisualSettings: Record<string, PropertyVisualSettings> = {}
-
-  // Step 4: Loop through activePayloadPropertyList and check against propertyVisualSettingsAtom
-  const propertyVisualSettings = get(propertyVisualSettingsAtom) || {}
-  const propertiesWithoutSettings: Property[] = []
-
-  for (const property of _payload) {
-    if (property && property.id && propertyVisualSettings[property.id]) {
-      if (property.axisType === 'y' || property.axisType === 'exception') {
-        // if (service && service['buckets']?.chart) {
-        //   const chartBucket = service['buckets'].chart
-        //   // Only update for color dimension
-        //   const color = propertyVisualSettings[property.id].color
-        //   if (color !== undefined) {
-        //     // Find index for this color in config
-        //     const config = chartBucket.config
-        //     const index = combinationToIndex(
-        //       propertyVisualSettings[property.id],
-        //       config,
-        //     )
-        //     if (index !== -1) {
-        //       chartBucket.usedIndexes.color[property.id] = index
-        //     }
-        //   }
-        // }
-      }
-    } else if (property && property.id) {
-      // No visual settings yet
-      propertiesWithoutSettings.push(property)
+  for (const dim of priority) {
+    if (!(dim in dimensions)) return -1
+    const dimKey = dim as keyof SeriesVisualDimensionConfig['dimensions']
+    const values = dimensions[dimKey]
+    // Use value from combination, or fallback to defaults if provided
+    let value = combination[dimKey]
+    if ((value === undefined || value === null) && defaults) {
+      // Only assign if not undefined/null, otherwise leave as is for fallback below
+      const def = defaults[dimKey]
+      value = def !== undefined ? def : null
     }
-  }
-
-  // Step 5: For properties without settings, check for defaultVisuals
-  const propertiesWithDefaultVisuals: Property[] = []
-  const propertiesWithoutDefaultVisuals: Property[] = []
-
-  for (const property of propertiesWithoutSettings) {
-    if (property && property.defaultVisuals) {
-      propertiesWithDefaultVisuals.push(property)
-      // Optionally, update localPropertyVisualSettings and usedIndexes here
-      // TODO: Integrate with visualAssignmentBucket logic for defaultVisuals
-      localPropertyVisualSettings[property.id] = property.defaultVisuals
-    } else {
-      propertiesWithoutDefaultVisuals.push(property)
+    // If required key is missing, fail
+    if (requiredKeys.includes(dim) && (value === undefined || value === null)) {
+      return -1
     }
-  }
-
-  // Step 6: For properties without defaultVisuals, check chartSettings and assign visuals based on type
-  // Assume chartSettingsAtom is available in main store
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { getMainAtomValue } = require('../../../store/mainStore')
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { chartSettingsAtom } = require('../../../main/chartSettingsAtom')
-  const chartSettings = getMainAtomValue(chartSettingsAtom) || {}
-
-  const type1Properties: Property[] = []
-  const type2Properties: Property[] = []
-  const unassignedProperties: Property[] = []
-
-  for (const property of propertiesWithoutDefaultVisuals) {
-    if (!property || !property.id) continue
-    // Type 1: y or exception
-    if (property.axisType === 'y' || property.axisType === 'exception') {
-      const chartSetting = chartSettings[property.propertyKey]
-      if (
-        chartSetting &&
-        chartSetting.settings &&
-        chartSetting.settings.colour &&
-        chartSetting.settings.colour[0]
-      ) {
-        // Assign first color from chart settings
-        localPropertyVisualSettings[property.id] = {
-          color: chartSetting.settings.colour[0],
-        } as PropertyVisualSettings
-        type1Properties.push(property)
-      } else {
-        unassignedProperties.push(property)
-      }
-    } else if (property.axisType === 'timeline') {
-      // Type 2: timeline
-      const chartSetting = chartSettings[property.propertyKey]
-      if (chartSetting && chartSetting.multiSettings) {
-        // Assign as MultiStateColorConfigType
-        localPropertyVisualSettings[property.id] = {
-          multiStateColorConfig: {
-            default: chartSetting.multiSettings.reduce(
-              (acc: Record<string, string>, setting: any) => {
-                if (setting.value && setting.colour)
-                  acc[setting.value] = setting.colour
-                return acc
-              },
-              {},
-            ),
-          },
-        } as PropertyVisualSettings
-        type2Properties.push(property)
-      } else {
-        unassignedProperties.push(property)
-      }
-    } else {
-      // Not type 1 or 2, collect for further processing
-      unassignedProperties.push(property)
-    }
-  }
-
-  // Step 7: Separate unassigned properties into type 1 and type 2
-  const unassignedType1: Property[] = []
-  const unassignedType2: Property[] = []
-  for (const property of unassignedProperties) {
-    if (property.axisType === 'y' || property.axisType === 'exception') {
-      unassignedType1.push(property)
-    } else if (property.axisType === 'timeline') {
-      unassignedType2.push(property)
-    }
-  }
-
-  // Step 8: Assign visuals using bucket logic for each type with MinHeap for freed indexes
-  if (service) {
-    // Type 1: Single color assignment using chart bucket
-    const chartBucket = service['buckets']?.chart
-    if (chartBucket) {
-      // MinHeap for freed indexes
-      const heap = new MinHeap()
-      ;(chartBucket.freedIndexes.color || []).forEach((idx) => heap.insert(idx))
-      let nextIndex = Object.keys(chartBucket.usedIndexes.color).length
-      for (const property of unassignedType1) {
-        let assignIndex: number
-        if (!heap.isEmpty()) {
-          assignIndex = heap.extractMin()!
+    // If optional key is missing and no default, skip (treat as first value in dimension)
+    if (value === undefined || value === null) {
+      // Defensive: always pick a primitive value for fallback
+      if (Array.isArray(values) && values.length > 0) {
+        // If the dimension is a MultiStateColors array, pick the first string from the first array
+        if (Array.isArray(values[0])) {
+          const arr = values[0] as unknown[]
+          value = typeof arr[0] === 'string' ? arr[0] : null
         } else {
-          assignIndex = nextIndex++
+          value = values[0]
         }
-        const config = chartBucket.config
-        const visual = indexToCombination(assignIndex, config)
-        localPropertyVisualSettings[property.id] = visual
-        chartBucket.usedIndexes.color[property.id] = assignIndex
+      } else {
+        value = null
       }
-      // Optionally update freedIndexes
-      chartBucket.freedIndexes.color = []
     }
-    // Type 2: Multi color assignment using Gantt bucket
-    const ganttBucket = service['buckets']?.Gantt
-    if (ganttBucket) {
-      const heap = new MinHeap()
-      ;(ganttBucket.freedIndexes.color || []).forEach((idx) => heap.insert(idx))
-      let nextIndex = Object.keys(ganttBucket.usedIndexes.color).length
-      for (const property of unassignedType2) {
-        let assignIndex: number
-        if (!heap.isEmpty()) {
-          assignIndex = heap.extractMin()!
-        } else {
-          assignIndex = nextIndex++
-        }
-        const config = ganttBucket.config
-        const visual = indexToCombination(assignIndex, config)
-        localPropertyVisualSettings[property.id] = visual
-        ganttBucket.usedIndexes.color[property.id] = assignIndex
-      }
-      ganttBucket.freedIndexes.color = []
-    }
+    // Defensive: skip if value is still null/undefined
+    if (value === undefined || value === null) return -1
+    const idx = values.findIndex((v) => v === value)
+    if (idx === -1) return -1 // Value not found in dimension array
+    indices.push(idx)
+    dimensionSizes.push(values.length)
   }
-
-  // Final: Set the computed visuals to the atom
-  set(propertyVisualSettingsAtom, localPropertyVisualSettings)
+  // Convert multi-dimensional indices to linear index
+  let index = 0
+  let multiplier = 1
+  for (let i = 0; i < indices.length; i++) {
+    index += indices[i] * multiplier
+    multiplier *= dimensionSizes[i]
+  }
+  return index
 }
-
-export class AssignmentService {
-  used: Set<number>
-  free: number[]
-  nextIndex: number
-  config: SeriesVisualDimensionConfig
-
-  constructor(chartConfig: SeriesVisualDimensionConfig) {
-    const bucket = this.createBucket(chartConfig)
-    this.used = bucket.used
-    this.free = bucket.free
-    this.nextIndex = bucket.nextIndex
-    this.config = bucket.config
-  }
-
-  private createBucket(
-    config: SeriesVisualDimensionConfig,
-  ): VisualAssignmentBucket {
-    // Initialize Used Indexes, Free Indexes, next Index.
-    const used: Set<number> = new Set()
-    const free: number[] = []
-    const nextIndex: number = 0
-
-    return {
-      used,
-      free,
-      nextIndex,
-      config,
-    }
-  }
-}
-
-
-
-
-
-
-
-
