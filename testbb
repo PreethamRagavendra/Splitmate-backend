@@ -1,0 +1,278 @@
+import { Getter, Setter, atom } from 'jotai'
+import { RESET } from 'jotai/utils'
+import { CHART_TYPES } from 'src/features/trends/constants/chart'
+import { SERIES_VISUAL_DIMENSION_CONFIGS } from 'src/features/trends/constants/visualSettings'
+import { Property } from 'src/features/trends/types/property'
+import {
+  PropertyVisualSettings,
+  SeriesVisualDimensionConfig,
+  VisualAssignmentBucket,
+  VisualScope,
+} from 'src/features/trends/types/visualSettings'
+import { activeChartConfigAtom } from '../../initialization/activeChartConfigAtom'
+import { propertyVisualSettingsAtom } from './propertyVisualSettings'
+
+const _defaultVisualAssignmentServiceAtom = atom<Record<
+  'chartService' | 'ganttService',
+  AssignmentService
+> | null>(null)
+
+export const initialiseDefaultVisualAssignment = atom(
+  null,
+  initialiseDefaultVisualAssignmentSetter,
+)
+
+function initialiseDefaultVisualAssignmentSetter(
+  get: Getter,
+  set: Setter,
+  reset?: typeof RESET,
+): void {
+  const activeChart = get(activeChartConfigAtom)
+
+  if (!activeChart || reset === RESET) {
+    set(_defaultVisualAssignmentServiceAtom, null)
+    return
+  }
+
+  let config = SERIES_VISUAL_DIMENSION_CONFIGS.default
+  if (activeChart.type && activeChart.type === CHART_TYPES.LINE) {
+    config = SERIES_VISUAL_DIMENSION_CONFIGS.Line
+  }
+  const chartService = new AssignmentService(config)
+  const ganttService = new AssignmentService(
+    SERIES_VISUAL_DIMENSION_CONFIGS.Gantt,
+  )
+  set(_defaultVisualAssignmentServiceAtom, {
+    chartService: chartService,
+    ganttService: ganttService,
+  })
+}
+
+export const assignDefaultVisualsActionAtom = atom(
+  null,
+  assignDefaultVisualsActionSetter,
+)
+
+function assignDefaultVisualsActionSetter(
+  get: Getter,
+  set: Setter,
+  _payload?: Property[],
+): void {
+  const service = get(_defaultVisualAssignmentServiceAtom)
+  const activeChart = get(activeChartConfigAtom)
+
+  if (!activeChart) {
+    set(_defaultVisualAssignmentServiceAtom, null)
+    return
+  }
+
+  // Step 2: Early exit if no active properties
+  if (!_payload || !_payload.length) {
+    return
+  }
+
+  // Step 3: Initialize localPropertyVisualSettings
+  let localPropertyVisualSettings: Record<string, PropertyVisualSettings> = {}
+
+  // Step 4: Loop through activePayloadPropertyList and check against propertyVisualSettingsAtom
+  const propertyVisualSettings = get(propertyVisualSettingsAtom) || {}
+  const propertiesWithoutSettings: Property[] = []
+
+  for (const property of _payload) {
+    if (property && property.id && propertyVisualSettings[property.id]) {
+      if (property.axisType === 'y' || property.axisType === 'exception') {
+        // if (service && service['buckets']?.chart) {
+        //   const chartBucket = service['buckets'].chart
+        //   // Only update for color dimension
+        //   const color = propertyVisualSettings[property.id].color
+        //   if (color !== undefined) {
+        //     // Find index for this color in config
+        //     const config = chartBucket.config
+        //     const index = combinationToIndex(
+        //       propertyVisualSettings[property.id],
+        //       config,
+        //     )
+        //     if (index !== -1) {
+        //       chartBucket.usedIndexes.color[property.id] = index
+        //     }
+        //   }
+        // }
+      }
+    } else if (property && property.id) {
+      // No visual settings yet
+      propertiesWithoutSettings.push(property)
+    }
+  }
+
+  // Step 5: For properties without settings, check for defaultVisuals
+  const propertiesWithDefaultVisuals: Property[] = []
+  const propertiesWithoutDefaultVisuals: Property[] = []
+
+  for (const property of propertiesWithoutSettings) {
+    if (property && property.defaultVisuals) {
+      propertiesWithDefaultVisuals.push(property)
+      // Optionally, update localPropertyVisualSettings and usedIndexes here
+      // TODO: Integrate with visualAssignmentBucket logic for defaultVisuals
+      localPropertyVisualSettings[property.id] = property.defaultVisuals
+    } else {
+      propertiesWithoutDefaultVisuals.push(property)
+    }
+  }
+
+  // Step 6: For properties without defaultVisuals, check chartSettings and assign visuals based on type
+  // Assume chartSettingsAtom is available in main store
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { getMainAtomValue } = require('../../../store/mainStore')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { chartSettingsAtom } = require('../../../main/chartSettingsAtom')
+  const chartSettings = getMainAtomValue(chartSettingsAtom) || {}
+
+  const type1Properties: Property[] = []
+  const type2Properties: Property[] = []
+  const unassignedProperties: Property[] = []
+
+  for (const property of propertiesWithoutDefaultVisuals) {
+    if (!property || !property.id) continue
+    // Type 1: y or exception
+    if (property.axisType === 'y' || property.axisType === 'exception') {
+      const chartSetting = chartSettings[property.propertyKey]
+      if (
+        chartSetting &&
+        chartSetting.settings &&
+        chartSetting.settings.colour &&
+        chartSetting.settings.colour[0]
+      ) {
+        // Assign first color from chart settings
+        localPropertyVisualSettings[property.id] = {
+          color: chartSetting.settings.colour[0],
+        } as PropertyVisualSettings
+        type1Properties.push(property)
+      } else {
+        unassignedProperties.push(property)
+      }
+    } else if (property.axisType === 'timeline') {
+      // Type 2: timeline
+      const chartSetting = chartSettings[property.propertyKey]
+      if (chartSetting && chartSetting.multiSettings) {
+        // Assign as MultiStateColorConfigType
+        localPropertyVisualSettings[property.id] = {
+          multiStateColorConfig: {
+            default: chartSetting.multiSettings.reduce(
+              (acc: Record<string, string>, setting: any) => {
+                if (setting.value && setting.colour)
+                  acc[setting.value] = setting.colour
+                return acc
+              },
+              {},
+            ),
+          },
+        } as PropertyVisualSettings
+        type2Properties.push(property)
+      } else {
+        unassignedProperties.push(property)
+      }
+    } else {
+      // Not type 1 or 2, collect for further processing
+      unassignedProperties.push(property)
+    }
+  }
+
+  // Step 7: Separate unassigned properties into type 1 and type 2
+  const unassignedType1: Property[] = []
+  const unassignedType2: Property[] = []
+  for (const property of unassignedProperties) {
+    if (property.axisType === 'y' || property.axisType === 'exception') {
+      unassignedType1.push(property)
+    } else if (property.axisType === 'timeline') {
+      unassignedType2.push(property)
+    }
+  }
+
+  // Step 8: Assign visuals using bucket logic for each type with MinHeap for freed indexes
+  if (service) {
+    // Type 1: Single color assignment using chart bucket
+    const chartBucket = service['buckets']?.chart
+    if (chartBucket) {
+      // MinHeap for freed indexes
+      const heap = new MinHeap()
+      ;(chartBucket.freedIndexes.color || []).forEach((idx) => heap.insert(idx))
+      let nextIndex = Object.keys(chartBucket.usedIndexes.color).length
+      for (const property of unassignedType1) {
+        let assignIndex: number
+        if (!heap.isEmpty()) {
+          assignIndex = heap.extractMin()!
+        } else {
+          assignIndex = nextIndex++
+        }
+        const config = chartBucket.config
+        const visual = indexToCombination(assignIndex, config)
+        localPropertyVisualSettings[property.id] = visual
+        chartBucket.usedIndexes.color[property.id] = assignIndex
+      }
+      // Optionally update freedIndexes
+      chartBucket.freedIndexes.color = []
+    }
+    // Type 2: Multi color assignment using Gantt bucket
+    const ganttBucket = service['buckets']?.Gantt
+    if (ganttBucket) {
+      const heap = new MinHeap()
+      ;(ganttBucket.freedIndexes.color || []).forEach((idx) => heap.insert(idx))
+      let nextIndex = Object.keys(ganttBucket.usedIndexes.color).length
+      for (const property of unassignedType2) {
+        let assignIndex: number
+        if (!heap.isEmpty()) {
+          assignIndex = heap.extractMin()!
+        } else {
+          assignIndex = nextIndex++
+        }
+        const config = ganttBucket.config
+        const visual = indexToCombination(assignIndex, config)
+        localPropertyVisualSettings[property.id] = visual
+        ganttBucket.usedIndexes.color[property.id] = assignIndex
+      }
+      ganttBucket.freedIndexes.color = []
+    }
+  }
+
+  // Final: Set the computed visuals to the atom
+  set(propertyVisualSettingsAtom, localPropertyVisualSettings)
+}
+
+export class AssignmentService {
+  used: Set<number>
+  free: number[]
+  nextIndex: number
+  config: SeriesVisualDimensionConfig
+
+  constructor(chartConfig: SeriesVisualDimensionConfig) {
+    const bucket = this.createBucket(chartConfig)
+    this.used = bucket.used
+    this.free = bucket.free
+    this.nextIndex = bucket.nextIndex
+    this.config = bucket.config
+  }
+
+  private createBucket(
+    config: SeriesVisualDimensionConfig,
+  ): VisualAssignmentBucket {
+    // Initialize Used Indexes, Free Indexes, next Index.
+    const used: Set<number> = new Set()
+    const free: number[] = []
+    const nextIndex: number = 0
+
+    return {
+      used,
+      free,
+      nextIndex,
+      config,
+    }
+  }
+}
+
+
+
+
+
+
+
+
